@@ -1,154 +1,201 @@
 import { useEffect, useRef, useState } from 'react'
 
-// ── REAL PHYSICS CONSTANTS ──
-const k  = 1.380649e-23   // Boltzmann constant J/K
-const mXe = 2.18e-25      // Xenon atom mass kg
-const q   = 1.602e-19     // Ion charge coulombs
-const mu0 = 4*Math.PI*1e-7 // Permeability of free space
+const k   = 1.380649e-23
+const mXe = 2.18e-25
+const q   = 1.602e-19
 const stefanBoltzmann = 5.67e-8
+const HULL_THICKNESS  = 0.003
+const SCALE = 1/500
 
-// ── REAL PHYSICS FUNCTIONS ──
-
-// Maxwell-Boltzmann: most probable xenon atom speed at temperature T
-function xenonThermalSpeed(T) {
-  return Math.sqrt(2 * k * T / mXe) // m/s
+// ── REAL PHYSICS ──
+function xenonThermalSpeed(T) { return Math.sqrt(2*k*T/mXe) }
+function stoppingPower(nXe, v, diam) {
+  const sigma = Math.PI*(diam/2+2.16e-10)**2
+  return nXe * mXe * v**2 * sigma
+}
+function velocityAfterGas(v0, mass, nXe, diam, dx) {
+  const dEdx = stoppingPower(nXe, v0, diam)
+  const newKE = Math.max(0, 0.5*mass*v0**2 - dEdx*dx)
+  return Math.sqrt(2*newKE/mass)
+}
+function plasmaHeatFlux(T) { return stefanBoltzmann*T**4 }
+function ablationRate(flux, area) { return (flux*area)/1.08e7 }
+function confinedFraction(B, R) { return Math.max(0,1-1/Math.sqrt(Math.max(1.001,R))) }
+function gyroradius(v, B) { return (mXe*v)/(q*Math.max(B,1e-10)) }
+function solarPower(area) { return 1361*area*0.85 }
+function xenonNumberDensity(mass, vol) { return (mass/mXe)/Math.max(vol,0.001) }
+function debrisMass(diam, dens) { return (4/3)*Math.PI*(diam/2)**3*dens }
+function penetrationDepth(diam, vel, dDens) {
+  const v_kms = vel/1000
+  return 0.82*(diam*100)**1.056*(dDens/2700)**0.519*v_kms**0.875/100
 }
 
-// Stopping power: energy lost per meter by debris in xenon gas
-// Based on momentum transfer collision physics
-function stoppingPower(xenonNumberDensity, debrisVelocity, debrisMass, debrisDiameter) {
-  const sigma = Math.PI * (debrisDiameter/2 + 2.16e-10)**2 // collision cross section m²
-  const dEdx  = xenonNumberDensity * mXe * debrisVelocity**2 * sigma
-  return dEdx // J/m
-}
+// ── DEBRIS TYPES WITH REAL COLORS AND PROPERTIES ──
+const DEBRIS_TYPES = [
+  {
+    name: 'Chondrite Meteorite',
+    color: '#8B6914',        // rocky brown
+    glowColor: '#ff6600',    // orange entry glow
+    trailColor: '#ff4400',
+    diameter: 0.008,
+    density: 3500,
+    velocity: 20000,
+    description: 'Stony meteorite, most common type',
+    origin: 'Asteroid belt',
+    composition: 'Silicate minerals, iron',
+    entryGlow: true,         // heats up entering atmosphere
+  },
+  {
+    name: 'Iron Meteorite',
+    color: '#5a5a6a',        // metallic grey-blue
+    glowColor: '#ffffff',
+    trailColor: '#aaaaff',
+    diameter: 0.015,
+    density: 7900,
+    velocity: 17000,
+    description: 'Dense iron-nickel composition',
+    origin: 'Differentiated asteroid core',
+    composition: 'Iron-Nickel alloy (Fe-Ni)',
+    entryGlow: true,
+  },
+  {
+    name: 'Carbonaceous Chondrite',
+    color: '#2a2a2a',        // very dark, carbon-rich
+    glowColor: '#440000',
+    trailColor: '#880000',
+    diameter: 0.012,
+    density: 2200,
+    velocity: 18000,
+    description: 'Primitive carbon-rich meteorite',
+    origin: 'Outer asteroid belt',
+    composition: 'Carbon, water ice, organics',
+    entryGlow: false,
+  },
+  {
+    name: 'Paint Fleck',
+    color: '#cccccc',        // white/grey
+    glowColor: '#ffffff',
+    trailColor: '#aaaaaa',
+    diameter: 0.001,
+    density: 1400,
+    velocity: 7500,
+    description: 'Spacecraft paint fragment',
+    origin: 'LEO debris belt',
+    composition: 'Polymer coating',
+    entryGlow: false,
+  },
+  {
+    name: 'Aluminium Shard',
+    color: '#b8c8d8',        // metallic light blue
+    glowColor: '#88ccff',
+    trailColor: '#4488aa',
+    diameter: 0.02,
+    density: 2700,
+    velocity: 9000,
+    description: 'Satellite structural fragment',
+    origin: 'LEO debris belt',
+    composition: 'Aluminium alloy 6061',
+    entryGlow: false,
+  },
+  {
+    name: 'Steel Bolt',
+    color: '#888890',
+    glowColor: '#aaaacc',
+    trailColor: '#666688',
+    diameter: 0.01,
+    density: 7800,
+    velocity: 11000,
+    description: 'Lost fastener from EVA',
+    origin: 'LEO debris belt',
+    composition: 'Stainless steel',
+    entryGlow: false,
+  },
+  {
+    name: 'Micrometeorite',
+    color: '#aa8844',
+    glowColor: '#ffcc44',
+    trailColor: '#ff8800',
+    diameter: 0.0003,
+    density: 3200,
+    velocity: 25000,
+    description: 'Sub-mm cosmic dust particle',
+    origin: 'Cometary debris stream',
+    composition: 'Olivine, pyroxene, iron',
+    entryGlow: true,
+  },
+  {
+    name: 'Satellite Panel',
+    color: '#1a3a6a',        // dark blue like solar panel
+    glowColor: '#4466ff',
+    trailColor: '#2244aa',
+    diameter: 0.08,
+    density: 1800,
+    velocity: 7800,
+    description: 'Solar panel fragment',
+    origin: 'LEO debris belt',
+    composition: 'GaAs cells, aluminium frame',
+    entryGlow: false,
+  },
+]
 
-// Velocity after traveling distance dx through xenon cloud
-function velocityAfterGas(v0, mass, xenonDensity, diameter, dx) {
-  const dEdx   = stoppingPower(xenonDensity, v0, mass, diameter)
-  const ke0    = 0.5 * mass * v0**2
-  const newKE  = Math.max(0, ke0 - dEdx * dx)
-  return Math.sqrt(2 * newKE / mass)
-}
+const DEBRIS_PRESETS = {}
+DEBRIS_TYPES.forEach(d => {
+  DEBRIS_PRESETS[d.name] = { diameter: d.diameter, density: d.density, velocity: d.velocity }
+})
 
-// Plasma heat flux W/m²
-function plasmaHeatFlux(T) {
-  return stefanBoltzmann * T**4
-}
-
-// Ablation: mass removed from debris per second by plasma
-function ablationRate(heatFlux, debrisArea) {
-  const sublimationEnergy = 1.08e7 // J/kg aluminum
-  return (heatFlux * debrisArea) / sublimationEnergy // kg/s
-}
-
-// Magnetic mirror confinement fraction
-function confinedFraction(B_equator, B_mirror) {
-  const R = B_mirror / B_equator
-  return Math.max(0, 1 - 1/Math.sqrt(Math.max(1.001, R)))
-}
-
-// Gyroradius of xenon ion in magnetic field
-function gyroradius(ionSpeed, B) {
-  return (mXe * ionSpeed) / (q * Math.max(B, 1e-10))
-}
-
-// Solar concentration: power delivered to plasma
-function solarPower(mirrorArea, targetArea, AU = 1) {
-  const solarConstant = 1361 / (AU**2) // W/m² at distance AU
-  const efficiency    = 0.85
-  return solarConstant * mirrorArea * efficiency // W
-}
-
-// Xenon number density from mass and volume
-function xenonNumberDensity(massKg, volumeM3) {
-  return (massKg / mXe) / Math.max(volumeM3, 0.001)
-}
-
-// Debris mass from diameter and density
-function debrisMass(diameterM, densityKgM3) {
-  const r = diameterM / 2
-  return (4/3) * Math.PI * r**3 * densityKgM3
-}
-
-// Cour-Palais penetration depth (NASA standard)
-function penetrationDepth(diam, velocity, debrisDens, shieldDens) {
-  const v_kms = velocity / 1000
-  return 0.82 * (diam*100)**1.056 *
-         (debrisDens/shieldDens)**0.519 *
-         v_kms**0.875 / 100 // meters
-}
-
-// Hull wall thickness (aluminum spacecraft)
-const HULL_THICKNESS = 0.003 // 3mm aluminum — real ISS wall thickness
-
-// ── DEBRIS PRESETS ──
-const DEBRIS_PRESETS = {
-  'Paint Fleck':     { diameter: 0.001, density: 1400, velocity: 7500  },
-  'Aluminium Shard': { diameter: 0.01,  density: 2700, velocity: 9000  },
-  'Steel Fragment':  { diameter: 0.008, density: 7800, velocity: 11000 },
-  'Micrometeorite':  { diameter: 0.005, density: 3500, velocity: 15000 },
-  'Satellite Chunk': { diameter: 0.05,  density: 2000, velocity: 8000  },
-}
-
-const SCALE = 1/500 // 1 pixel = 500 meters ... scaled for vis
+// LEO debris belt zones (pixel radius from center)
+const LEO_BELTS = [
+  { name: 'LEO Dense (400-600km)', radius: 210, width: 18,
+    color: 'rgba(255,80,80,0.12)', labelColor: '#ff5544',
+    description: 'Most congested orbital shell — ISS altitude' },
+  { name: 'LEO Medium (600-800km)', radius: 240, width: 16,
+    color: 'rgba(255,160,40,0.09)', labelColor: '#ff9933',
+    description: 'High debris density from Iridium collision' },
+  { name: 'LEO Sparse (800-1000km)', radius: 268, width: 14,
+    color: 'rgba(255,220,50,0.07)', labelColor: '#ffcc22',
+    description: 'Moderate risk — Cosmos 954 altitude' },
+  { name: 'MEO (2000km+)', radius: 295, width: 10,
+    color: 'rgba(100,200,255,0.05)', labelColor: '#44aaff',
+    description: 'Medium Earth Orbit — GPS satellites' },
+]
 
 export default function App() {
-  const canvasRef  = useRef(null)
-  const animRef    = useRef(null)
-  const chartRef   = useRef(null)
-  const histRef    = useRef({ t:[], neutralized:[], penetrated:[], plasma:[], efficiency:[] })
+  const canvasRef = useRef(null)
+  const animRef   = useRef(null)
+  const chartRef  = useRef(null)
+  const histRef   = useRef({ t:[], neutralized:[], penetrated:[], plasma:[], efficiency:[] })
 
-  // ── ALL REAL PHYSICS PARAMETERS ──
   const params = useRef({
-    // Xenon
-    xenonMassKg:      100,
-    xenonFlowRate:    0.3,       // kg/min
-    xenonVolumeM3:    1000,      // cloud volume m³
-
-    // Plasma
-    plasmaTemp:       300,       // K current
-    onboardPowerW:    50000,     // W electron beam power
-    mirrorAreaM2:     10,        // m² parabolic mirror
-
-    // Magnetic
-    magneticFieldT:   0.02,      // Tesla at equator
-    mirrorRatio:      3.0,       // B_mirror / B_equator
-
-    // Debris (user controlled)
-    debrisDiameter:   0.01,      // meters
-    debrisDensity:    2700,      // kg/m³
-    debrisVelocity:   9000,      // m/s
-    debrisSpawnRate:  0.025,     // per frame
-
-    // State
-    shieldActive:     false,
-    mirrorActive:     false,
-    xenonMass:        100,
-    hullIntegrity:    100,
-    debrisParticles:  [],
-    collisionEvents:  [],
-    particles:        [],
+    xenonMass:       100,
+    xenonFlowRate:   0.3,
+    xenonVolumeM3:   1000,
+    plasmaTemp:      300,
+    onboardPowerW:   50000,
+    mirrorAreaM2:    10,
+    magneticFieldT:  0.02,
+    mirrorRatio:     3.0,
+    debrisDiameter:  0.01,
+    debrisDensity:   2700,
+    debrisVelocity:  9000,
+    debrisSpawnRate: 0.025,
+    selectedType:    null,   // null = random mix
+    showBelts:       true,
+    showOrbits:      true,
+    shieldActive:    false,
+    mirrorActive:    false,
+    hullIntegrity:   100,
+    debrisParticles: [],
+    collisionEvents: [],
+    particles:       [],
     debrisDetected:   0,
     debrisNeutralized:0,
     debrisPenetrated: 0,
     time:             0,
     lastChart:        0,
-
-    // Computed (updated each frame)
-    computed: {
-      xenonDensity:      0,
-      thermalSpeed:      0,
-      heatFlux:          0,
-      gyroradius:        0,
-      confinedFraction:  0,
-      shieldEfficiency:  0,
-      debrisMass:        0,
-      penetrationDepth:  0,
-      velocityInShield:  0,
-    }
+    computed: {}
   })
 
-  const [ui, setUi] = useState({})
+  const [ui, setUi]   = useState({})
   const [tab, setTab] = useState('shield')
 
   useEffect(() => {
@@ -157,44 +204,67 @@ export default function App() {
     const chartC = chartRef.current
     const cctx   = chartC.getContext('2d')
 
+    function pickDebrisType() {
+      const p = params.current
+      if (p.selectedType !== null) return DEBRIS_TYPES[p.selectedType]
+      // Random weighted mix — man-made more common in LEO
+      const weights = [1,1,1, 8,8,6, 2, 3] // meteorites less common than debris
+      const total = weights.reduce((a,b)=>a+b,0)
+      let r = Math.random()*total
+      for (let i=0; i<weights.length; i++) {
+        r -= weights[i]
+        if (r<=0) return DEBRIS_TYPES[i]
+      }
+      return DEBRIS_TYPES[4]
+    }
+
     function spawnDebris() {
-      const p   = params.current
-      const ang = Math.random() * Math.PI * 2
-      const r   = 290
+      const p    = params.current
+      const type = pickDebrisType()
 
-      // Real debris mass from user parameters
-      const mass = debrisMass(p.debrisDiameter, p.debrisDensity)
+      // Spawn from a random LEO belt or from all directions
+      const beltSpawn = p.showBelts && Math.random() < 0.7
+      let spawnRadius = 280
+      if (beltSpawn) {
+        const belt = LEO_BELTS[Math.floor(Math.random()*LEO_BELTS.length)]
+        spawnRadius = belt.radius + (Math.random()-0.5)*belt.width
+      }
 
-      // Pixel velocity scaled from real m/s
-      const pixelSpeed = p.debrisVelocity * SCALE * 0.016
+      const ang   = Math.random()*Math.PI*2
+      const diam  = p.selectedType !== null ? p.debrisDiameter : type.diameter
+      const dens  = p.selectedType !== null ? p.debrisDensity  : type.density
+      const vel   = p.selectedType !== null ? p.debrisVelocity : type.velocity
+      const mass  = debrisMass(diam, dens)
+      const pixSpeed = vel * SCALE * 0.016
 
       p.debrisParticles.push({
-        x:        Math.cos(ang) * r,
-        y:        Math.sin(ang) * r,
-        vx:      -Math.cos(ang) * pixelSpeed,
-        vy:      -Math.sin(ang) * pixelSpeed,
-        realVelocity:  p.debrisVelocity,   // m/s — changes as shield slows it
-        diameter:      p.debrisDiameter,   // m
-        density:       p.debrisDensity,    // kg/m³
-        mass,                              // kg
-        pixSize: Math.max(2, Math.log10(p.debrisDiameter*1000+1)*5),
-        id: Math.random(),
-        age: 0,
+        x:           Math.cos(ang)*spawnRadius,
+        y:           Math.sin(ang)*spawnRadius,
+        vx:         -Math.cos(ang)*pixSpeed,
+        vy:         -Math.sin(ang)*pixSpeed,
+        realVelocity: vel,
+        diameter:    diam,
+        density:     dens,
+        mass,
+        type,
+        // Visual
+        pixSize:     Math.max(1.5, Math.log10(diam*1000+1.1)*5),
+        trailLength: 6 + Math.floor(vel/3000),
+        entryHeat:   0,  // 0-1 heating effect
+        id:          Math.random(),
+        age:         0,
+        fromBelt:    beltSpawn,
       })
       p.debrisDetected++
     }
 
     function spawnParticle(x, y, color, n=8) {
-      const p = params.current
-      for (let i=0; i<n; i++) {
-        const a = Math.random()*Math.PI*2
-        const s = 0.5 + Math.random()*2.5
-        p.particles.push({
-          x, y,
-          vx: Math.cos(a)*s, vy: Math.sin(a)*s,
-          color, life: 1,
-          size: 1+Math.random()*2.5,
-          id: Math.random()
+      for (let i=0;i<n;i++) {
+        const a=Math.random()*Math.PI*2
+        const s=0.5+Math.random()*2.5
+        params.current.particles.push({
+          x,y, vx:Math.cos(a)*s, vy:Math.sin(a)*s,
+          color, life:1, size:1+Math.random()*2.5, id:Math.random()
         })
       }
     }
@@ -204,246 +274,244 @@ export default function App() {
       const now = Date.now()
       p.time   += 0.016
 
-      // ── COMPUTE REAL PHYSICS EACH FRAME ──
-
-      // Xenon number density (real)
-      const nXe = xenonNumberDensity(p.xenonMass, p.xenonVolumeM3)
-
-      // Thermal speed of xenon ions
+      // ── COMPUTE PHYSICS ──
+      const nXe      = xenonNumberDensity(p.xenonMass, p.xenonVolumeM3)
       const vThermal = xenonThermalSpeed(p.plasmaTemp)
+      const rGyro    = gyroradius(vThermal, p.magneticFieldT)
+      const confFrac = confinedFraction(p.magneticFieldT, p.mirrorRatio)
+      const hFlux    = plasmaHeatFlux(p.plasmaTemp)
+      const dMass    = debrisMass(p.debrisDiameter, p.debrisDensity)
+      const dArea    = Math.PI*(p.debrisDiameter/2)**2
 
-      // Gyroradius of confined ions
-      const rGyro = gyroradius(vThermal, p.magneticFieldT)
-
-      // Fraction of ions magnetically confined
-      const confFrac = confinedFraction(
-        p.magneticFieldT,
-        p.magneticFieldT * p.mirrorRatio
-      )
-
-      // Plasma heat flux
-      const hFlux = plasmaHeatFlux(p.plasmaTemp)
-
-      // Current debris properties
-      const dMass = debrisMass(p.debrisDiameter, p.debrisDensity)
-      const dArea = Math.PI * (p.debrisDiameter/2)**2
-
-      // Velocity after passing through xenon cloud (real stopping power)
-      const cloudThicknessM = 50 // meters — realistic xenon cloud depth
-      const vAfterGas = p.shieldActive && nXe > 0
-        ? velocityAfterGas(p.debrisVelocity, dMass, nXe, p.debrisDiameter, cloudThicknessM)
+      const vAfterGas = p.shieldActive && nXe>0
+        ? velocityAfterGas(p.debrisVelocity, dMass, nXe, p.debrisDiameter, 50)
         : p.debrisVelocity
 
-      // Ablation mass removed per second
-      const ablRate = ablationRate(hFlux, dArea) // kg/s
-      const transitTime = cloudThicknessM / Math.max(vAfterGas, 1)
-      const massAblated = ablRate * transitTime
-      const fractionAblated = Math.min(1, massAblated / Math.max(dMass, 1e-30))
-
-      // Penetration depth if debris hits hull
-      const penDepth = penetrationDepth(
-        p.debrisDiameter,
-        vAfterGas,
-        p.debrisDensity,
-        2700  // aluminum hull
-      )
+      const ablRate    = ablationRate(hFlux, dArea)
+      const transitT   = 50/Math.max(vAfterGas,1)
+      const massAbl    = ablRate*transitT
+      const fracAbl    = Math.min(1, massAbl/Math.max(dMass,1e-30))
+      const velRed     = Math.max(0,1-vAfterGas/Math.max(p.debrisVelocity,1))
+      const penDepth   = penetrationDepth(p.debrisDiameter,vAfterGas,p.debrisDensity)
       const penetrates = penDepth > HULL_THICKNESS
+      const shieldEff  = Math.min(1, fracAbl*0.5+velRed*0.3+confFrac*0.2)
 
-      // Overall shield efficiency from real physics
-      const velocityReduction = Math.max(0, 1 - vAfterGas/Math.max(p.debrisVelocity,1))
-      const shieldEff = Math.min(1,
-        fractionAblated * 0.5 +
-        velocityReduction * 0.3 +
-        confFrac * 0.2
-      )
-
-      // Store computed values for display
       p.computed = {
-        xenonDensity:     nXe,
-        thermalSpeed:     vThermal,
-        heatFlux:         hFlux,
-        gyroradius:       rGyro,
-        confinedFraction: confFrac,
-        shieldEfficiency: shieldEff,
-        debrisMass:       dMass,
-        penetrationDepth: penDepth,
-        velocityInShield: vAfterGas,
-        fractionAblated,
-        penetrates,
-        velocityReduction,
+        xenonDensity:nXe, thermalSpeed:vThermal, heatFlux:hFlux,
+        gyroradius:rGyro, confinedFraction:confFrac, shieldEfficiency:shieldEff,
+        debrisMass:dMass, penetrationDepth:penDepth, velocityInShield:vAfterGas,
+        fractionAblated:fracAbl, penetrates, velocityReduction:velRed
       }
 
       // ── SHIELD STATE ──
-      if (p.shieldActive && p.xenonMass > 0) {
-        // Consume xenon based on flow rate
-        p.xenonMass = Math.max(0, p.xenonMass - (p.xenonFlowRate/60) * 0.016)
-
-        // Plasma temperature: heating from onboard power + solar
-        const solarW    = p.mirrorActive ? solarPower(p.mirrorAreaM2, 300) : 0
-        const totalPow  = p.onboardPowerW + solarW
-        // dT/dt = Power / (volume * heat capacity of plasma)
-        const heatCap   = 520 // J/(kg·K) approximate plasma
-        const plasmaMass= nXe * mXe * p.xenonVolumeM3
-        const dTdt      = plasmaMass > 0
-          ? totalPow / (plasmaMass * heatCap)
-          : totalPow / (1e-6 * heatCap)
-        const cooling   = stefanBoltzmann * p.plasmaTemp**4 * 1e-8
-        p.plasmaTemp    = Math.max(300, p.plasmaTemp + (dTdt - cooling) * 0.016 * 100)
-
-        if (p.xenonMass <= 0) p.shieldActive = false
+      if (p.shieldActive && p.xenonMass>0) {
+        p.xenonMass = Math.max(0, p.xenonMass-(p.xenonFlowRate/60)*0.016)
+        const solarW   = p.mirrorActive ? solarPower(p.mirrorAreaM2) : 0
+        const totalPow = p.onboardPowerW+solarW
+        const plasmaMass = nXe*mXe*p.xenonVolumeM3
+        const dTdt = plasmaMass>0 ? totalPow/(plasmaMass*520) : totalPow/520
+        const cooling = stefanBoltzmann*p.plasmaTemp**4*1e-8
+        p.plasmaTemp = Math.max(300, p.plasmaTemp+(dTdt-cooling)*0.016*100)
+        if (p.xenonMass<=0) p.shieldActive=false
       } else {
-        // Cool down naturally
-        p.plasmaTemp = Math.max(300, p.plasmaTemp - (p.plasmaTemp - 300) * 0.01)
+        p.plasmaTemp = Math.max(300, p.plasmaTemp-(p.plasmaTemp-300)*0.01)
       }
 
-      // ── SPAWN DEBRIS ──
-      if (Math.random() < p.debrisSpawnRate) spawnDebris()
+      // Spawn
+      if (Math.random()<p.debrisSpawnRate) spawnDebris()
 
-      // ── PROCESS DEBRIS ──
+      // Process debris
       const toRemove = []
       for (const d of p.debrisParticles) {
-        d.x  += d.vx
-        d.y  += d.vy
-        d.age++
-        const dist = Math.sqrt(d.x**2 + d.y**2)
+        d.x  += d.vx; d.y += d.vy; d.age++
+        const dist = Math.sqrt(d.x**2+d.y**2)
 
-        if (p.shieldActive && dist < 185 && dist > 95) {
-          // Apply real stopping power to THIS debris particle
-          const nXeLocal = xenonNumberDensity(p.xenonMass, p.xenonVolumeM3)
+        // Entry heating effect — debris glows as it enters shield
+        if (dist < 220 && d.type.entryGlow) {
+          d.entryHeat = Math.min(1, d.entryHeat+0.05)
+        }
 
-          // Slow debris using real equation
-          d.realVelocity = velocityAfterGas(
-            d.realVelocity, d.mass, nXeLocal, d.diameter, 2
-          )
+        if (p.shieldActive && dist<185 && dist>95) {
+          const nXeL = xenonNumberDensity(p.xenonMass, p.xenonVolumeM3)
+          d.realVelocity = velocityAfterGas(d.realVelocity,d.mass,nXeL,d.diameter,2)
+          d.vx *= 0.998; d.vy *= 0.998
 
-          // Scale pixel velocity to match real velocity
-          const speedRatio = d.realVelocity / p.debrisVelocity
-          d.vx *= 0.998 // gradual pixel slowdown
-          d.vy *= 0.998
+          const dA2   = Math.PI*(d.diameter/2)**2
+          const ablM  = ablationRate(hFlux,dA2)*0.016
+          d.mass      = Math.max(0, d.mass-ablM)
+          d.diameter  = d.mass>0 ? 2*Math.cbrt((3*d.mass)/(4*Math.PI*d.density)) : 0
 
-          // Ablation check using real heat flux
-          const dArea2    = Math.PI*(d.diameter/2)**2
-          const ablMass   = ablationRate(hFlux, dArea2) * 0.016
-          const ablFrac   = ablMass / Math.max(d.mass, 1e-30)
-          d.mass          = Math.max(0, d.mass - ablMass)
-          d.diameter      = d.mass > 0
-            ? 2*Math.cbrt((3*d.mass)/(4*Math.PI*d.density))
-            : 0
-
-          if (d.mass <= 0 || ablFrac > 0.99) {
-            // Fully ablated
-            p.collisionEvents.push({x:d.x,y:d.y,type:'ABLATION',time:now})
-            spawnParticle(canvas.width/2+d.x, canvas.height/2+d.y, '#ff8844', 10)
-            toRemove.push(d.id)
-            p.debrisNeutralized++
-            continue
+          if (d.mass<=0) {
+            p.collisionEvents.push({x:d.x,y:d.y,type:'ABLATION',
+              color:d.type.glowColor,time:now})
+            spawnParticle(canvas.width/2+d.x,canvas.height/2+d.y,d.type.glowColor,12)
+            toRemove.push(d.id); p.debrisNeutralized++; continue
           }
 
-          // Slowdown enough to be harmless?
-          const penD = penetrationDepth(d.diameter, d.realVelocity, d.density, 2700)
-          if (penD < HULL_THICKNESS * 0.5 && d.realVelocity < 1000) {
-            p.collisionEvents.push({x:d.x,y:d.y,type:'SLOWDOWN',time:now})
-            spawnParticle(canvas.width/2+d.x, canvas.height/2+d.y, '#44aaff', 8)
-            toRemove.push(d.id)
-            p.debrisNeutralized++
-            continue
+          const pD = penetrationDepth(d.diameter,d.realVelocity,d.density)
+          if (pD<HULL_THICKNESS*0.5&&d.realVelocity<1000) {
+            p.collisionEvents.push({x:d.x,y:d.y,type:'SLOWDOWN',
+              color:d.type.glowColor,time:now})
+            spawnParticle(canvas.width/2+d.x,canvas.height/2+d.y,'#44aaff',8)
+            toRemove.push(d.id); p.debrisNeutralized++; continue
           }
         }
 
-        // Hit spacecraft
-        if (dist < 42) {
-          const penD  = penetrationDepth(d.diameter, d.realVelocity, d.density, 2700)
-          const hulls = penD / HULL_THICKNESS  // fraction of hull penetrated
-          const dmg   = Math.min(40, hulls * 15 + d.diameter * 200)
-          p.hullIntegrity = Math.max(0, p.hullIntegrity - dmg)
-          p.collisionEvents.push({x:d.x,y:d.y,type:'PENETRATION',time:now})
-          spawnParticle(canvas.width/2+d.x, canvas.height/2+d.y, '#ff2222', 14)
-          toRemove.push(d.id)
-          p.debrisPenetrated++
-          continue
+        if (dist<42) {
+          const pD  = penetrationDepth(d.diameter,d.realVelocity,d.density)
+          const hulls = pD/HULL_THICKNESS
+          p.hullIntegrity = Math.max(0, p.hullIntegrity-Math.min(40,hulls*15+d.diameter*200))
+          p.collisionEvents.push({x:d.x,y:d.y,type:'PENETRATION',
+            color:d.type.glowColor,time:now})
+          spawnParticle(canvas.width/2+d.x,canvas.height/2+d.y,d.type.color,14)
+          toRemove.push(d.id); p.debrisPenetrated++; continue
         }
 
-        if (dist > 320) toRemove.push(d.id)
+        if (dist>330) toRemove.push(d.id)
       }
 
-      p.debrisParticles  = p.debrisParticles.filter(d => !toRemove.includes(d.id))
-      p.collisionEvents  = p.collisionEvents.filter(e => now - e.time < 700)
+      p.debrisParticles = p.debrisParticles.filter(d=>!toRemove.includes(d.id))
+      p.collisionEvents = p.collisionEvents.filter(e=>now-e.time<700)
 
-      // Visual particles
       for (const pt of p.particles) {
-        pt.x += pt.vx; pt.y += pt.vy
-        pt.life -= 0.035; pt.vx *= 0.94; pt.vy *= 0.94
+        pt.x+=pt.vx; pt.y+=pt.vy
+        pt.life-=0.035; pt.vx*=0.94; pt.vy*=0.94
       }
-      p.particles = p.particles.filter(pt => pt.life > 0)
+      p.particles = p.particles.filter(pt=>pt.life>0)
 
-      // Chart update every 2s
-      if (now - p.lastChart > 2000) {
-        const h = histRef.current
+      // Chart
+      if (now-p.lastChart>2000) {
+        const h=histRef.current
         h.t.push(Math.floor(p.time))
         h.neutralized.push(p.debrisNeutralized)
         h.penetrated.push(p.debrisPenetrated)
         h.plasma.push(Math.floor(p.plasmaTemp))
         h.efficiency.push(Math.floor(shieldEff*100))
-        if (h.t.length > 30) {
+        if (h.t.length>30) {
           h.t.shift();h.neutralized.shift()
           h.penetrated.shift();h.plasma.shift();h.efficiency.shift()
         }
-        p.lastChart = now
+        p.lastChart=now
         drawChart(cctx)
       }
 
-      drawMain(ctx, canvas, p, now)
+      drawMain(ctx,canvas,p,now)
       setUi({
-        shieldActive:      p.shieldActive,
-        mirrorActive:      p.mirrorActive,
-        xenonMass:         p.xenonMass,
-        plasmaTemp:        p.plasmaTemp,
-        magneticFieldT:    p.magneticFieldT,
-        hullIntegrity:     p.hullIntegrity,
-        debrisDetected:    p.debrisDetected,
-        debrisNeutralized: p.debrisNeutralized,
-        debrisPenetrated:  p.debrisPenetrated,
-        computed:          p.computed,
-        debrisDiameter:    p.debrisDiameter,
-        debrisVelocity:    p.debrisVelocity,
-        debrisDensity:     p.debrisDensity,
+        shieldActive:p.shieldActive, mirrorActive:p.mirrorActive,
+        xenonMass:p.xenonMass, plasmaTemp:p.plasmaTemp,
+        magneticFieldT:p.magneticFieldT, hullIntegrity:p.hullIntegrity,
+        debrisDetected:p.debrisDetected, debrisNeutralized:p.debrisNeutralized,
+        debrisPenetrated:p.debrisPenetrated, computed:p.computed,
+        debrisDiameter:p.debrisDiameter, debrisVelocity:p.debrisVelocity,
+        debrisDensity:p.debrisDensity, selectedType:p.selectedType,
+        showBelts:p.showBelts, showOrbits:p.showOrbits,
       })
 
       animRef.current = requestAnimationFrame(step)
     }
 
     animRef.current = requestAnimationFrame(step)
-    return () => cancelAnimationFrame(animRef.current)
+    return ()=>cancelAnimationFrame(animRef.current)
   }, [])
 
-  // ── DRAW ──
   function drawMain(ctx, canvas, p, now) {
     const cx = canvas.width/2
     const cy = canvas.height/2
     const c  = p.computed
 
-    ctx.fillStyle = '#000008'
+    // Deep space background
+    ctx.fillStyle='#000008'
     ctx.fillRect(0,0,canvas.width,canvas.height)
 
-    // Stars
-    for (let i=0; i<180; i++) {
-      const sx = (i*137.5)%canvas.width
-      const sy = (i*97.3)%canvas.height
-      const tw = 0.2+Math.abs(Math.sin(p.time*0.4+i))*0.4
-      ctx.fillStyle=`rgba(255,255,255,${tw})`
-      ctx.fillRect(sx,sy,i%7===0?2:1,i%7===0?2:1)
+    // Milky way glow (subtle)
+    const mwGrad = ctx.createLinearGradient(0,0,canvas.width,canvas.height)
+    mwGrad.addColorStop(0,'rgba(20,15,40,0.3)')
+    mwGrad.addColorStop(0.5,'rgba(40,30,60,0.15)')
+    mwGrad.addColorStop(1,'rgba(10,5,20,0.3)')
+    ctx.fillStyle=mwGrad
+    ctx.fillRect(0,0,canvas.width,canvas.height)
+
+    // Stars — varied sizes and colors like real stars
+    const starColors=['#ffffff','#ffe8cc','#cce8ff','#ffeeaa','#ccddff']
+    for (let i=0;i<250;i++) {
+      const sx=(i*137.508)%canvas.width
+      const sy=(i*97.333)%canvas.height
+      const twinkle=0.15+Math.abs(Math.sin(p.time*0.3+i*0.7))*0.5
+      const size = i%20===0?2:i%7===0?1.5:1
+      ctx.fillStyle=starColors[i%starColors.length].replace(')',`,${twinkle})`).replace('rgb','rgba').replace('#','rgba(').replace(/([0-9a-f]{2})/gi,(m)=>parseInt(m,16)+',')
+      // simpler star rendering:
+      const brightness = 0.1+Math.abs(Math.sin(p.time*0.3+i*0.7))*0.6
+      ctx.fillStyle=`rgba(255,255,255,${brightness})`
+      if (i%15===0) ctx.fillStyle=`rgba(255,220,180,${brightness})`
+      if (i%23===0) ctx.fillStyle=`rgba(180,200,255,${brightness})`
+      ctx.fillRect(sx,sy,size,size)
     }
 
+    // Earth glow at bottom (we're in LEO)
+    const earthGrad=ctx.createRadialGradient(cx,canvas.height+180,100,cx,canvas.height+180,380)
+    earthGrad.addColorStop(0,'rgba(20,80,200,0.25)')
+    earthGrad.addColorStop(0.5,'rgba(10,40,120,0.15)')
+    earthGrad.addColorStop(1,'rgba(0,0,0,0)')
+    ctx.fillStyle=earthGrad
+    ctx.fillRect(0,0,canvas.width,canvas.height)
+
+    // ── LEO DEBRIS BELTS ──
+    if (p.showBelts) {
+      for (const belt of LEO_BELTS) {
+        // Belt ring
+        ctx.strokeStyle=belt.color.replace('0.','0.6)')
+                                   .replace('rgba(','').replace(')','')
+        // Draw as thick ring
+        for (let w=0;w<belt.width;w++) {
+          const alpha=0.04*(1-w/belt.width)
+          ctx.strokeStyle=belt.color.replace(/[\d.]+\)$/,`${alpha})`)
+          ctx.lineWidth=3
+          ctx.beginPath()
+          ctx.arc(cx,cy,belt.radius-belt.width/2+w,0,Math.PI*2)
+          ctx.stroke()
+        }
+
+        // Debris specks IN the belt
+        for (let i=0;i<12;i++) {
+          const ang = (i/12)*Math.PI*2 + p.time*0.02*(i%3===0?1:-1)
+          const r   = belt.radius + (Math.sin(i*7.3)*belt.width*0.4)
+          const x   = cx+Math.cos(ang)*r
+          const y   = cy+Math.sin(ang)*r
+          ctx.fillStyle=belt.labelColor.replace(')',',0.4)').replace('#','rgba(')
+          // simple dot for belt debris
+          ctx.fillStyle=`rgba(200,150,100,0.3)`
+          ctx.fillRect(x,y,1,1)
+        }
+
+        // Belt label
+        const labelAng = -Math.PI/4
+        const lx = cx+Math.cos(labelAng)*(belt.radius)
+        const ly = cy+Math.sin(labelAng)*(belt.radius)
+        ctx.fillStyle=belt.labelColor
+        ctx.font='8px monospace'
+        ctx.fillText(belt.name.split('(')[1]?.replace(')','')+'',lx+4,ly)
+      }
+    }
+
+    // Orbit ring for spacecraft
+    if (p.showOrbits) {
+      ctx.strokeStyle='rgba(60,120,180,0.15)'
+      ctx.lineWidth=1; ctx.setLineDash([4,8])
+      ctx.beginPath(); ctx.arc(cx,cy,0,0,Math.PI*2); ctx.stroke()
+      ctx.setLineDash([])
+    }
+
+    // ── SHIELD LAYERS ──
     if (p.shieldActive) {
-      // Magnetic field lines — density shows confinement
-      const fieldAlpha = 0.06 + p.magneticFieldT*4
+      // Magnetic field lines
+      const fieldAlpha = 0.06+p.magneticFieldT*4
       const pulse = 0.7+Math.sin(p.time*2)*0.3
       ctx.strokeStyle=`rgba(80,120,255,${fieldAlpha*pulse})`
       ctx.lineWidth=0.8
-      const lineCount = Math.floor(4 + c.confinedFraction*6)
-      for (let a=0; a<Math.PI*2; a+=Math.PI*2/lineCount) {
+      const lineCount=Math.floor(4+(c.confinedFraction||0)*6)
+      for (let a=0;a<Math.PI*2;a+=Math.PI*2/lineCount) {
         ctx.beginPath()
-        for (let t=-Math.PI/2; t<=Math.PI/2; t+=0.04) {
+        for (let t=-Math.PI/2;t<=Math.PI/2;t+=0.04) {
           const r=185*Math.cos(t)**2
           const x=cx+r*Math.cos(t+a+p.time*0.05)
           const y=cy+r*Math.sin(t+a+p.time*0.05)*0.55
@@ -452,10 +520,10 @@ export default function App() {
         ctx.stroke()
       }
 
-      // Xenon cloud — opacity from real density
-      if (p.xenonMass > 0) {
-        const densNorm = Math.min(1, c.xenonDensity/1e15)
-        const xa = densNorm * 0.4
+      // Xenon cloud
+      if (p.xenonMass>0) {
+        const densNorm=Math.min(1,(c.xenonDensity||0)/1e15)
+        const xa=densNorm*0.45
         for (let layer=0;layer<3;layer++) {
           const grad=ctx.createRadialGradient(cx,cy,45+layer*15,cx,cy,155+layer*15)
           grad.addColorStop(0,'rgba(100,160,255,0)')
@@ -463,42 +531,33 @@ export default function App() {
           grad.addColorStop(0.85,`rgba(140,200,255,${xa*0.7})`)
           grad.addColorStop(1,'rgba(140,200,255,0)')
           ctx.fillStyle=grad
-          ctx.beginPath()
-          ctx.arc(cx,cy,170+layer*10,0,Math.PI*2)
-          ctx.fill()
+          ctx.beginPath(); ctx.arc(cx,cy,170+layer*10,0,Math.PI*2); ctx.fill()
         }
       }
 
-      // Plasma — color and intensity from real temperature
-      const tNorm  = Math.min(1, p.plasmaTemp/15000)
-      const flick  = 0.85+Math.sin(p.time*7)*0.15
-      // Color shifts blue→purple→white as temp rises
-      const pr = Math.floor(100+tNorm*155)
-      const pg = Math.floor(40+tNorm*60)
-      const pb = 255
+      // Plasma layer
+      const tNorm=Math.min(1,p.plasmaTemp/15000)
+      const flick=0.85+Math.sin(p.time*7)*0.15
+      const pr=Math.floor(100+tNorm*155)
       const pGrad=ctx.createRadialGradient(cx,cy,88,cx,cy,168)
-      pGrad.addColorStop(0,`rgba(${pr},${pg},${pb},0)`)
-      pGrad.addColorStop(0.4,`rgba(${pr},${pg},${pb},${tNorm*0.2*flick})`)
-      pGrad.addColorStop(0.78,`rgba(${pr},${pg},${pb},${tNorm*0.55*flick})`)
-      pGrad.addColorStop(1,`rgba(${pr},${pg},${pb},0)`)
+      pGrad.addColorStop(0,`rgba(${pr},60,255,0)`)
+      pGrad.addColorStop(0.4,`rgba(${pr},60,255,${tNorm*0.2*flick})`)
+      pGrad.addColorStop(0.78,`rgba(${pr},60,255,${tNorm*0.55*flick})`)
+      pGrad.addColorStop(1,`rgba(${pr},60,255,0)`)
       ctx.fillStyle=pGrad
-      ctx.beginPath()
-      ctx.arc(cx,cy,168,0,Math.PI*2)
-      ctx.fill()
+      ctx.beginPath(); ctx.arc(cx,cy,168,0,Math.PI*2); ctx.fill()
 
-      // Shield boundary — shows real efficiency
-      ctx.strokeStyle=`rgba(0,255,120,${c.shieldEfficiency*0.7})`
-      ctx.lineWidth=1.5
-      ctx.setLineDash([4,6])
+      // Efficiency ring
+      ctx.strokeStyle=`rgba(0,255,120,${(c.shieldEfficiency||0)*0.7})`
+      ctx.lineWidth=1.5; ctx.setLineDash([4,6])
       ctx.beginPath()
-      ctx.arc(cx,cy,190,0,Math.PI*2*c.shieldEfficiency)
-      ctx.stroke()
-      ctx.setLineDash([])
+      ctx.arc(cx,cy,192,0,Math.PI*2*(c.shieldEfficiency||0))
+      ctx.stroke(); ctx.setLineDash([])
     }
 
-    // Solar rays — count shows mirror area
-    if (p.mirrorActive && p.shieldActive) {
-      const rayCount = Math.floor(p.mirrorAreaM2/3)
+    // Solar mirror
+    if (p.mirrorActive&&p.shieldActive) {
+      const rayCount=Math.floor(p.mirrorAreaM2/3)
       for (let i=-rayCount;i<=rayCount;i++) {
         const al=0.3+Math.abs(Math.sin(p.time*3+i))*0.3
         ctx.strokeStyle=`rgba(255,230,80,${al})`
@@ -510,15 +569,13 @@ export default function App() {
         ctx.stroke()
       }
       ctx.strokeStyle='rgba(200,200,100,0.7)'
-      ctx.lineWidth=2
-      ctx.beginPath()
-      ctx.arc(cx+178,cy,32,-Math.PI*0.65,Math.PI*0.65)
-      ctx.stroke()
+      ctx.lineWidth=2; ctx.beginPath()
+      ctx.arc(cx+178,cy,32,-Math.PI*0.65,Math.PI*0.65); ctx.stroke()
     }
 
-    // Spacecraft hull color shows damage
-    const hullCol = p.hullIntegrity>60?'#1a2a3a':p.hullIntegrity>30?'#3a2a1a':'#3a1510'
-    const hullStr = p.hullIntegrity>60?'#3a6a9a':p.hullIntegrity>30?'#9a6a2a':'#cc3010'
+    // Spacecraft
+    const hullCol=p.hullIntegrity>60?'#1a2a3a':p.hullIntegrity>30?'#3a2a1a':'#3a1510'
+    const hullStr=p.hullIntegrity>60?'#3a6a9a':p.hullIntegrity>30?'#9a6a2a':'#cc3010'
 
     if (p.shieldActive) {
       const thrPos=[[cx-38,cy-10],[cx-38,cy+10],[cx+38,cy-10],[cx+38,cy+10]]
@@ -534,15 +591,13 @@ export default function App() {
     ctx.fillStyle=hullCol; ctx.strokeStyle=hullStr; ctx.lineWidth=1.5
     ctx.beginPath(); ctx.roundRect(cx-38,cy-18,76,36,4); ctx.fill(); ctx.stroke()
 
-    // Hull crack when damaged
-    if (p.hullIntegrity < 50) {
+    if (p.hullIntegrity<50) {
       ctx.strokeStyle=`rgba(255,80,30,${(50-p.hullIntegrity)/50})`
       ctx.lineWidth=0.8; ctx.beginPath()
       ctx.moveTo(cx-8,cy-18); ctx.lineTo(cx+4,cy-4)
       ctx.lineTo(cx-2,cy+18); ctx.stroke()
     }
 
-    // Solar panels
     ctx.fillStyle='#0a2a5a'; ctx.strokeStyle='#1a4a8a'; ctx.lineWidth=1
     ctx.fillRect(cx-95,cy-7,52,14); ctx.strokeRect(cx-95,cy-7,52,14)
     ctx.fillRect(cx+43,cy-7,52,14); ctx.strokeRect(cx+43,cy-7,52,14)
@@ -552,45 +607,62 @@ export default function App() {
       ctx.beginPath(); ctx.moveTo(cx+43+i*13,cy-7); ctx.lineTo(cx+43+i*13,cy+7); ctx.stroke()
     }
 
-    // Hull bar under ship
-    ctx.fillStyle='rgba(0,0,0,0.5)'; ctx.fillRect(cx-80,cy+32,160,8)
+    // Hull integrity bar
     const hc=p.hullIntegrity>60?'#00ff88':p.hullIntegrity>30?'#ffaa00':'#ff3333'
+    ctx.fillStyle='rgba(0,0,0,0.5)'; ctx.fillRect(cx-80,cy+32,160,8)
     ctx.fillStyle=hc; ctx.fillRect(cx-80,cy+32,160*(p.hullIntegrity/100),8)
     ctx.strokeStyle='#1a2a3a'; ctx.lineWidth=1; ctx.strokeRect(cx-80,cy+32,160,8)
     ctx.fillStyle='#888'; ctx.font='9px monospace'
     ctx.fillText(`HULL ${p.hullIntegrity.toFixed(0)}%`,cx-18,cy+52)
 
-    // Debris
+    // ── DEBRIS PARTICLES ──
     for (const d of p.debrisParticles) {
       const x=cx+d.x; const y=cy+d.y
       const dist=Math.sqrt(d.x**2+d.y**2)
       const inShield=dist<185&&p.shieldActive
-      const slowFrac=1-d.realVelocity/p.debrisVelocity
+      const slowFrac=Math.max(0,1-d.realVelocity/d.type.velocity)
 
-      // Color shifts red→orange as debris slows (real velocity)
-      const dr=255; const dg=Math.floor(slowFrac*150)
-      const g2=ctx.createRadialGradient(x,y,0,x,y,d.pixSize*3)
-      g2.addColorStop(0,`rgba(${dr},${dg},0,0.7)`)
-      g2.addColorStop(1,'rgba(0,0,0,0)')
-      ctx.fillStyle=g2; ctx.beginPath()
-      ctx.arc(x,y,d.pixSize*3,0,Math.PI*2); ctx.fill()
+      // Entry heating glow for meteorites
+      if (d.entryHeat>0) {
+        const heatGrad=ctx.createRadialGradient(x,y,0,x,y,d.pixSize*6)
+        heatGrad.addColorStop(0,`rgba(255,150,30,${d.entryHeat*0.8})`)
+        heatGrad.addColorStop(1,'rgba(255,80,0,0)')
+        ctx.fillStyle=heatGrad
+        ctx.beginPath(); ctx.arc(x,y,d.pixSize*6,0,Math.PI*2); ctx.fill()
+      }
 
-      ctx.fillStyle=inShield?`rgb(${dr},${dg},0)`:'#ff3333'
+      // Outer glow
+      const glowCol=inShield?d.type.glowColor:d.type.color
+      const gGrad=ctx.createRadialGradient(x,y,0,x,y,d.pixSize*3)
+      gGrad.addColorStop(0,glowCol+'aa')
+      gGrad.addColorStop(1,'rgba(0,0,0,0)')
+      ctx.fillStyle=gGrad
+      ctx.beginPath(); ctx.arc(x,y,d.pixSize*3,0,Math.PI*2); ctx.fill()
+
+      // Trail — color from debris type
+      const trailLen = d.trailLength*(1+d.entryHeat*2)
+      ctx.strokeStyle=d.type.trailColor+'55'
+      ctx.lineWidth=d.pixSize*0.8
+      ctx.beginPath(); ctx.moveTo(x,y)
+      ctx.lineTo(x-d.vx*trailLen,y-d.vy*trailLen); ctx.stroke()
+
+      // Core — changes color as it slows
+      const mixCol = inShield && slowFrac>0.1
+        ? `rgba(255,${Math.floor(150+slowFrac*100)},50,0.9)`
+        : d.type.color+'dd'
+      ctx.fillStyle=mixCol
       ctx.beginPath(); ctx.arc(x,y,d.pixSize,0,Math.PI*2); ctx.fill()
 
-      ctx.strokeStyle='rgba(255,50,50,0.2)'; ctx.lineWidth=1
-      ctx.beginPath(); ctx.moveTo(x,y)
-      ctx.lineTo(x-d.vx*10,y-d.vy*10); ctx.stroke()
+      // Size dot at center
+      ctx.fillStyle='rgba(255,255,255,0.6)'
+      ctx.beginPath(); ctx.arc(x,y,Math.max(0.5,d.pixSize*0.3),0,Math.PI*2); ctx.fill()
     }
 
     // Visual particles
     for (const pt of p.particles) {
-      const col=pt.color.startsWith('#')
-        ? pt.color
-        : pt.color
       ctx.globalAlpha=pt.life
-      ctx.fillStyle=col; ctx.beginPath()
-      ctx.arc(pt.x,pt.y,pt.size*pt.life,0,Math.PI*2); ctx.fill()
+      ctx.fillStyle=pt.color
+      ctx.beginPath(); ctx.arc(pt.x,pt.y,pt.size*pt.life,0,Math.PI*2); ctx.fill()
     }
     ctx.globalAlpha=1
 
@@ -612,69 +684,64 @@ export default function App() {
       }
     }
 
-    // Telemetry HUD
-    ctx.fillStyle='rgba(0,4,12,0.8)'
-    ctx.fillRect(10,10,225,210)
+    // ── HUD ──
+    ctx.fillStyle='rgba(0,4,12,0.82)'
+    ctx.fillRect(10,10,228,215)
     ctx.strokeStyle='#1a3a5a'; ctx.lineWidth=0.5
-    ctx.strokeRect(10,10,225,210)
+    ctx.strokeRect(10,10,228,215)
     ctx.fillStyle='#4a8aaa'; ctx.font='10px monospace'
     ctx.fillText('AEGOS SHIELD TELEMETRY',20,28)
     ctx.font='10px monospace'
     const lines=[
-      {t:`Status:   ${p.shieldActive?'ACTIVE':'OFFLINE'}`,
+      {t:`Status:    ${p.shieldActive?'ACTIVE':'OFFLINE'}`,
        c:p.shieldActive?'#00ff88':'#ff4444'},
-      {t:`Plasma:   ${Math.floor(p.plasmaTemp).toLocaleString()} K`,c:'#aa88ff'},
-      {t:`Xe Dens:  ${c.xenonDensity?.toExponential(1)} /m³`,c:'#88aaff'},
-      {t:`Xe Speed: ${(c.thermalSpeed/1000)?.toFixed(1)} km/s`,c:'#88ccff'},
-      {t:`Gyrorad:  ${(c.gyroradius*100)?.toFixed(2)} cm`,c:'#88ddff'},
-      {t:`Confined: ${((c.confinedFraction||0)*100).toFixed(0)}%`,c:'#88ffcc'},
-      {t:`Heat Flux:${(c.heatFlux/1e6)?.toFixed(0)} MW/m²`,c:'#ffaa88'},
+      {t:`Plasma:    ${Math.floor(p.plasmaTemp).toLocaleString()} K`,c:'#aa88ff'},
+      {t:`Xe Dens:   ${(c.xenonDensity||0).toExponential(1)} /m³`,c:'#88aaff'},
+      {t:`Gyrorad:   ${((c.gyroradius||0)*100).toFixed(2)} cm`,c:'#88ddff'},
+      {t:`Confined:  ${((c.confinedFraction||0)*100).toFixed(0)}%`,c:'#88ffcc'},
+      {t:`Heat Flux: ${((c.heatFlux||0)/1e6).toFixed(0)} MW/m²`,c:'#ffaa88'},
       {t:`Vel→shield:${((c.velocityInShield||0)/1000).toFixed(1)} km/s`,c:'#ffcc44'},
-      {t:`Ablated:  ${((c.fractionAblated||0)*100).toFixed(1)}%`,c:'#ff8844'},
-      {t:`Pen depth:${((c.penetrationDepth||0)*1000).toFixed(2)} mm`,c:
-        (c.penetrationDepth||0)>HULL_THICKNESS?'#ff4444':'#44ff88'},
-      {t:`Shield:   ${((c.shieldEfficiency||0)*100).toFixed(0)}%`,c:'#00ff88'},
-      {t:`Hull:     ${p.hullIntegrity.toFixed(0)}%`,c:hc},
-      {t:`Neutral:  ${p.debrisNeutralized}`,c:'#44ff88'},
-      {t:`Impact:   ${p.debrisPenetrated}`,c:'#ff4444'},
+      {t:`Ablated:   ${((c.fractionAblated||0)*100).toFixed(1)}%`,c:'#ff8844'},
+      {t:`Pen depth: ${((c.penetrationDepth||0)*1000).toFixed(2)} mm`,
+       c:(c.penetrationDepth||0)>HULL_THICKNESS?'#ff4444':'#44ff88'},
+      {t:`Shield:    ${((c.shieldEfficiency||0)*100).toFixed(0)}%`,c:'#00ff88'},
+      {t:`Hull:      ${p.hullIntegrity.toFixed(0)}%`,c:hc},
+      {t:`Neutral:   ${p.debrisNeutralized}`,c:'#44ff88'},
+      {t:`Impact:    ${p.debrisPenetrated}`,c:'#ff4444'},
+      {t:`Detected:  ${p.debrisDetected}`,c:'#aaaaaa'},
     ]
     lines.forEach((l,i)=>{
-      ctx.fillStyle=l.c
-      ctx.fillText(l.t,20,46+i*12)
+      ctx.fillStyle=l.c; ctx.fillText(l.t,20,46+i*12)
     })
   }
 
   function drawChart(ctx) {
     const h=histRef.current
     const w=chartRef.current.width
-    const h2=chartRef.current.height
-    ctx.fillStyle='#000d1a'; ctx.fillRect(0,0,w,h2)
+    const hh=chartRef.current.height
+    ctx.fillStyle='#000d1a'; ctx.fillRect(0,0,w,hh)
     if (h.t.length<2) return
-
     const maxN=Math.max(...h.neutralized,1)
 
-    // Neutralized
     ctx.strokeStyle='#44ff88'; ctx.lineWidth=2; ctx.beginPath()
     h.neutralized.forEach((v,i)=>{
       const x=(i/(h.neutralized.length-1))*(w-20)+10
-      const y=h2-20-(v/maxN)*(h2-30)
+      const y=hh-20-(v/maxN)*(hh-30)
       i===0?ctx.moveTo(x,y):ctx.lineTo(x,y)
     }); ctx.stroke()
 
-    // Penetrated
     ctx.strokeStyle='#ff4444'; ctx.lineWidth=2; ctx.beginPath()
     h.penetrated.forEach((v,i)=>{
       const x=(i/(h.penetrated.length-1))*(w-20)+10
-      const y=h2-20-(v/maxN)*(h2-30)
+      const y=hh-20-(v/maxN)*(hh-30)
       i===0?ctx.moveTo(x,y):ctx.lineTo(x,y)
     }); ctx.stroke()
 
-    // Shield efficiency
     ctx.strokeStyle='#00ff88'; ctx.lineWidth=1.5
     ctx.setLineDash([3,3]); ctx.beginPath()
     h.efficiency.forEach((v,i)=>{
       const x=(i/(h.efficiency.length-1))*(w-20)+10
-      const y=h2-20-(v/100)*(h2-30)
+      const y=hh-20-(v/100)*(hh-30)
       i===0?ctx.moveTo(x,y):ctx.lineTo(x,y)
     }); ctx.stroke(); ctx.setLineDash([])
 
@@ -684,31 +751,26 @@ export default function App() {
     ctx.fillStyle='#00ff88'; ctx.fillText('--- Efficiency',190,12)
   }
 
-  // ── PARAM SETTERS — all change real physics ──
-  const set = (key, val) => { params.current[key] = val }
-
+  const set = (key,val) => { params.current[key]=val }
   function loadPreset(name) {
-    const pr = DEBRIS_PRESETS[name]
-    params.current.debrisDiameter = pr.diameter
-    params.current.debrisDensity  = pr.density
-    params.current.debrisVelocity = pr.velocity
+    const pr=DEBRIS_PRESETS[name]
+    params.current.debrisDiameter=pr.diameter
+    params.current.debrisDensity=pr.density
+    params.current.debrisVelocity=pr.velocity
   }
 
-  const eff = ui.debrisDetected > 0
-    ? ((ui.debrisNeutralized/ui.debrisDetected)*100).toFixed(0) : 0
+  const eff=ui.debrisDetected>0
+    ?((ui.debrisNeutralized/ui.debrisDetected)*100).toFixed(0):0
+  const c=ui.computed||{}
+  const hc=(ui.hullIntegrity||100)>60?'#00ff88'
+          :(ui.hullIntegrity||100)>30?'#ffaa00':'#ff3333'
 
-  const c = ui.computed || {}
-
-  const hc = (ui.hullIntegrity||100)>60?'#00ff88'
-           : (ui.hullIntegrity||100)>30?'#ffaa00':'#ff3333'
-
-  // ── UI ──
   return (
     <div style={{
-      background:'#000', minHeight:'100vh',
-      display:'flex', alignItems:'flex-start',
-      justifyContent:'center', gap:'1rem',
-      padding:'1rem', fontFamily:'monospace'
+      background:'#000',minHeight:'100vh',
+      display:'flex',alignItems:'flex-start',
+      justifyContent:'center',gap:'1rem',
+      padding:'1rem',fontFamily:'monospace'
     }}>
       <div>
         <canvas ref={canvasRef} width={620} height={580}
@@ -718,21 +780,21 @@ export default function App() {
                   marginTop:3,background:'#000d1a'}}/>
       </div>
 
-      {/* Control panel */}
       <div style={{
-        width:270, background:'#050d15',
-        border:'1px solid #1a2a3a', color:'#fff',
-        alignSelf:'flex-start', fontSize:11
+        width:275,background:'#050d15',
+        border:'1px solid #1a2a3a',color:'#fff',
+        alignSelf:'flex-start',fontSize:11
       }}>
         {/* Tabs */}
         <div style={{display:'flex',borderBottom:'1px solid #1a2a3a'}}>
-          {['shield','debris','physics'].map(t=>(
+          {['shield','debris','belts','physics'].map(t=>(
             <button key={t} onClick={()=>setTab(t)} style={{
-              flex:1, padding:'9px 2px', background:tab===t?'#0a1a2a':'transparent',
+              flex:1,padding:'8px 2px',
+              background:tab===t?'#0a1a2a':'transparent',
               border:'none',
               borderBottom:tab===t?'2px solid #4a8aaa':'2px solid transparent',
-              color:tab===t?'#4a8aaa':'#444', cursor:'pointer',
-              fontSize:10, letterSpacing:'0.08em', textTransform:'uppercase'
+              color:tab===t?'#4a8aaa':'#444',cursor:'pointer',
+              fontSize:9,letterSpacing:'0.06em',textTransform:'uppercase'
             }}>{t}</button>
           ))}
         </div>
@@ -740,69 +802,65 @@ export default function App() {
         <div style={{padding:'1rem'}}>
 
           {/* ── SHIELD TAB ── */}
-          {tab==='shield' && (<>
+          {tab==='shield'&&(<>
             <button onClick={()=>set('shieldActive',!params.current.shieldActive)}
               style={{
-                width:'100%', padding:'11px', cursor:'pointer',
+                width:'100%',padding:'11px',cursor:'pointer',
                 background:ui.shieldActive?'#0a2a0a':'#1a0808',
                 border:`1px solid ${ui.shieldActive?'#00ff44':'#ff4400'}`,
                 color:ui.shieldActive?'#00ff44':'#ff4400',
-                fontSize:12, letterSpacing:'0.1em', marginBottom:'0.75rem'
+                fontSize:12,letterSpacing:'0.1em',marginBottom:'0.75rem'
               }}>
               {ui.shieldActive?'● SHIELD ACTIVE':'○ ACTIVATE SHIELD'}
             </button>
 
             <button onClick={()=>set('mirrorActive',!params.current.mirrorActive)}
               style={{
-                width:'100%', padding:'9px', cursor:'pointer',
+                width:'100%',padding:'9px',cursor:'pointer',
                 background:ui.mirrorActive?'#181600':'transparent',
                 border:`1px solid ${ui.mirrorActive?'#ffdd00':'#2a2a2a'}`,
                 color:ui.mirrorActive?'#ffdd00':'#444',
-                fontSize:11, marginBottom:'1rem'
+                fontSize:11,marginBottom:'0.9rem'
               }}>
               {ui.mirrorActive?'◉ SOLAR MIRROR ON':'○ SOLAR MIRROR OFF'}
             </button>
 
-            {/* Magnetic field */}
             {[
-              {label:'Magnetic Field (T)',key:'magneticFieldT',
+              {label:'Magnetic Field',key:'magneticFieldT',
                min:0.001,max:0.1,step:0.001,
-               val:(ui.magneticFieldT||0.02).toFixed(3),unit:'T',
+               disp:(ui.magneticFieldT||0.02).toFixed(3),unit:'T',
                note:`${((c.confinedFraction||0)*100).toFixed(0)}% ions confined`},
               {label:'Mirror Ratio',key:'mirrorRatio',
                min:1.1,max:10,step:0.1,
-               val:(params.current.mirrorRatio||3).toFixed(1),unit:'x',
-               note:`Loss cone: ${(Math.asin(1/Math.sqrt(params.current.mirrorRatio||3))*180/Math.PI).toFixed(0)}°`},
-              {label:'Xenon Flow Rate',key:'xenonFlowRate',
+               disp:(params.current.mirrorRatio||3).toFixed(1),unit:'x',
+               note:`Loss cone ${(Math.asin(1/Math.sqrt(params.current.mirrorRatio||3))*180/Math.PI).toFixed(0)}°`},
+              {label:'Xenon Flow',key:'xenonFlowRate',
                min:0.05,max:2,step:0.05,
-               val:(params.current.xenonFlowRate||0.3).toFixed(2),unit:'kg/min',
-               note:`${(ui.xenonMass||100).toFixed(1)} kg left`},
+               disp:(params.current.xenonFlowRate||0.3).toFixed(2),unit:'kg/min',
+               note:`${(ui.xenonMass||100).toFixed(1)} kg remaining`},
               {label:'Mirror Area',key:'mirrorAreaM2',
                min:1,max:50,step:1,
-               val:(params.current.mirrorAreaM2||10).toFixed(0),unit:'m²',
-               note:`${(solarPower(params.current.mirrorAreaM2||10,300)/1000).toFixed(0)} kW delivered`},
+               disp:(params.current.mirrorAreaM2||10).toFixed(0),unit:'m²',
+               note:`${(solarPower(params.current.mirrorAreaM2||10)/1000).toFixed(0)} kW solar`},
               {label:'Onboard Power',key:'onboardPowerW',
                min:1000,max:500000,step:1000,
-               val:((params.current.onboardPowerW||50000)/1000).toFixed(0),unit:'kW',
+               disp:((params.current.onboardPowerW||50000)/1000).toFixed(0),unit:'kW',
                note:'electron beam heating'},
             ].map(s=>(
-              <div key={s.key} style={{marginBottom:'0.9rem'}}>
-                <div style={{
-                  display:'flex',justifyContent:'space-between',
-                  color:'#4a8aaa',marginBottom:3
-                }}>
+              <div key={s.key} style={{marginBottom:'0.8rem'}}>
+                <div style={{display:'flex',justifyContent:'space-between',
+                             color:'#4a8aaa',marginBottom:3}}>
                   <span>{s.label}</span>
-                  <span style={{color:'#fff'}}>{s.val} {s.unit}</span>
+                  <span style={{color:'#fff'}}>{s.disp} {s.unit}</span>
                 </div>
                 <input type="range" min={s.min} max={s.max} step={s.step}
                   defaultValue={params.current[s.key]||s.min}
                   onChange={e=>set(s.key,parseFloat(e.target.value))}
                   style={{width:'100%',marginBottom:2}}/>
-                <div style={{color:'#444',fontSize:10}}>{s.note}</div>
+                <div style={{color:'#333',fontSize:9}}>{s.note}</div>
               </div>
             ))}
 
-            {/* Actions */}
             <div style={{display:'flex',gap:6,marginTop:'0.5rem'}}>
               <button onClick={()=>{params.current.xenonMass=100}}
                 style={{flex:1,padding:'7px',cursor:'pointer',
@@ -814,192 +872,248 @@ export default function App() {
                   color:'#44aa44',fontSize:10}}>✦ Repair</button>
             </div>
 
-            {/* Hull bar */}
             <div style={{marginTop:'0.75rem'}}>
-              <div style={{
-                display:'flex',justifyContent:'space-between',
-                color:'#4a8aaa',marginBottom:4,fontSize:10
-              }}>
+              <div style={{display:'flex',justifyContent:'space-between',
+                           color:'#4a8aaa',marginBottom:4,fontSize:10}}>
                 <span>HULL INTEGRITY</span>
                 <span style={{color:hc}}>{(ui.hullIntegrity||100).toFixed(0)}%</span>
               </div>
               <div style={{background:'#0a0a0a',height:8,borderRadius:2,overflow:'hidden'}}>
-                <div style={{
-                  height:'100%',
-                  width:`${ui.hullIntegrity||100}%`,
-                  background:hc,transition:'width 0.3s,background 0.3s'
-                }}/>
+                <div style={{height:'100%',width:`${ui.hullIntegrity||100}%`,
+                             background:hc,transition:'width 0.3s'}}/>
               </div>
             </div>
 
-            {/* Stats */}
-            <div style={{
-              marginTop:'0.75rem',paddingTop:'0.75rem',
-              borderTop:'1px solid #1a2a3a',lineHeight:2
-            }}>
+            <div style={{marginTop:'0.75rem',paddingTop:'0.75rem',
+                         borderTop:'1px solid #1a2a3a',lineHeight:2}}>
               <div style={{color:'#44ff88'}}>Neutralized: {ui.debrisNeutralized}</div>
-              <div style={{color:'#ff4444'}}>Penetrated:  {ui.debrisPenetrated}</div>
-              <div style={{color:'#aaa'}}>Detected:    {ui.debrisDetected}</div>
-              <div style={{color:'#fff'}}>Efficiency:  {eff}%</div>
+              <div style={{color:'#ff4444'}}>Penetrated: {ui.debrisPenetrated}</div>
+              <div style={{color:'#aaa'}}>Detected: {ui.debrisDetected}</div>
+              <div style={{color:'#fff'}}>Efficiency: {eff}%</div>
             </div>
           </>)}
 
           {/* ── DEBRIS TAB ── */}
-          {tab==='debris' && (<>
-            <div style={{color:'#4a8aaa',marginBottom:'0.75rem',
-                         letterSpacing:'0.1em',fontSize:10}}>
-              DEBRIS PARAMETERS
+          {tab==='debris'&&(<>
+            <div style={{color:'#4a8aaa',fontSize:10,
+                         letterSpacing:'0.1em',marginBottom:'0.75rem'}}>
+              DEBRIS TYPE
             </div>
 
-            {/* Presets */}
+            {/* Type selector */}
             <div style={{marginBottom:'0.75rem'}}>
-              <div style={{color:'#4a8aaa',fontSize:10,marginBottom:4}}>PRESETS</div>
-              <div style={{display:'flex',flexWrap:'wrap',gap:4}}>
-                {Object.keys(DEBRIS_PRESETS).map(name=>(
-                  <button key={name} onClick={()=>loadPreset(name)} style={{
-                    padding:'4px 7px',cursor:'pointer',fontSize:9,
-                    background:'transparent',border:'1px solid #1a3a5a',
-                    color:'#4a8aaa'
-                  }}>{name}</button>
-                ))}
-              </div>
+              <button
+                onClick={()=>set('selectedType',null)}
+                style={{
+                  width:'100%',padding:'7px',cursor:'pointer',fontSize:10,
+                  background:ui.selectedType===null?'#0a1a2a':'transparent',
+                  border:`1px solid ${ui.selectedType===null?'#4a8aaa':'#1a2a3a'}`,
+                  color:ui.selectedType===null?'#4a8aaa':'#444',marginBottom:4
+                }}>
+                ◈ Random Mix (realistic distribution)
+              </button>
+              {DEBRIS_TYPES.map((d,i)=>(
+                <button key={d.name}
+                  onClick={()=>{
+                    set('selectedType',i)
+                    loadPreset(d.name)
+                  }}
+                  style={{
+                    width:'100%',padding:'6px 8px',cursor:'pointer',fontSize:10,
+                    background:ui.selectedType===i?'#0a1a2a':'transparent',
+                    border:`1px solid ${ui.selectedType===i?'#4a8aaa':'#1a2a3a'}`,
+                    color:'#fff',marginBottom:3,
+                    display:'flex',alignItems:'center',gap:8,textAlign:'left'
+                  }}>
+                  <span style={{
+                    width:10,height:10,borderRadius:'50%',
+                    background:d.color,flexShrink:0,
+                    boxShadow:`0 0 4px ${d.glowColor}`
+                  }}/>
+                  <span style={{flex:1}}>{d.name}</span>
+                  <span style={{color:'#444',fontSize:9}}>
+                    {(d.velocity/1000).toFixed(0)}km/s
+                  </span>
+                </button>
+              ))}
             </div>
 
+            {/* Selected type info */}
+            {ui.selectedType!==null&&(
+              <div style={{
+                background:'#0a1020',border:'1px solid #1a2a3a',
+                padding:'0.75rem',marginBottom:'0.75rem',fontSize:10
+              }}>
+                <div style={{
+                  color:DEBRIS_TYPES[ui.selectedType]?.glowColor,
+                  marginBottom:6,fontWeight:'bold'
+                }}>
+                  {DEBRIS_TYPES[ui.selectedType]?.name}
+                </div>
+                <div style={{color:'#666',lineHeight:1.8}}>
+                  <div>{DEBRIS_TYPES[ui.selectedType]?.description}</div>
+                  <div>Origin: {DEBRIS_TYPES[ui.selectedType]?.origin}</div>
+                  <div>Material: {DEBRIS_TYPES[ui.selectedType]?.composition}</div>
+                </div>
+              </div>
+            )}
+
+            {/* Custom sliders */}
             {[
               {label:'Diameter',key:'debrisDiameter',
                min:0.0001,max:0.2,step:0.0001,
-               display:((ui.debrisDiameter||0.01)*1000).toFixed(1),unit:'mm',
-               note:'affects mass, ablation, penetration'},
+               disp:((ui.debrisDiameter||0.01)*1000).toFixed(1),unit:'mm'},
               {label:'Density',key:'debrisDensity',
-               min:500,max:8000,step:100,
-               display:(ui.debrisDensity||2700).toFixed(0),unit:'kg/m³',
-               note:'500=foam, 2700=Al, 7800=steel'},
+               min:500,max:8000,step:50,
+               disp:(ui.debrisDensity||2700).toFixed(0),unit:'kg/m³'},
               {label:'Velocity',key:'debrisVelocity',
-               min:100,max:20000,step:100,
-               display:((ui.debrisVelocity||9000)/1000).toFixed(1),unit:'km/s',
-               note:'LEO avg ~7.5 km/s'},
+               min:100,max:25000,step:100,
+               disp:((ui.debrisVelocity||9000)/1000).toFixed(1),unit:'km/s'},
               {label:'Spawn Rate',key:'debrisSpawnRate',
                min:0.005,max:0.15,step:0.005,
-               display:(params.current.debrisSpawnRate*100).toFixed(1),unit:'%/frame',
-               note:'debris field density'},
+               disp:(params.current.debrisSpawnRate*100).toFixed(1),unit:'%'},
             ].map(s=>(
-              <div key={s.key} style={{marginBottom:'1rem'}}>
-                <div style={{
-                  display:'flex',justifyContent:'space-between',
-                  color:'#4a8aaa',marginBottom:3
-                }}>
+              <div key={s.key} style={{marginBottom:'0.8rem'}}>
+                <div style={{display:'flex',justifyContent:'space-between',
+                             color:'#4a8aaa',marginBottom:3}}>
                   <span>{s.label}</span>
-                  <span style={{color:'#fff'}}>{s.display} {s.unit}</span>
+                  <span style={{color:'#fff'}}>{s.disp} {s.unit}</span>
                 </div>
-                <input type="range"
-                  min={s.min} max={s.max} step={s.step}
+                <input type="range" min={s.min} max={s.max} step={s.step}
                   defaultValue={params.current[s.key]}
                   onChange={e=>set(s.key,parseFloat(e.target.value))}
-                  style={{width:'100%',marginBottom:2}}/>
-                <div style={{color:'#444',fontSize:10}}>{s.note}</div>
+                  style={{width:'100%'}}/>
               </div>
             ))}
 
-            {/* Live debris physics readout */}
-            <div style={{
-              marginTop:'0.5rem',paddingTop:'0.75rem',
-              borderTop:'1px solid #1a2a3a'
-            }}>
+            {/* Physics readout */}
+            <div style={{paddingTop:'0.75rem',borderTop:'1px solid #1a2a3a'}}>
               <div style={{color:'#4a8aaa',fontSize:10,
-                           marginBottom:6,letterSpacing:'0.1em'}}>
-                LIVE PHYSICS READOUT
-              </div>
+                           marginBottom:6,letterSpacing:'0.08em'}}>PHYSICS READOUT</div>
               {[
-                {label:'Debris mass',
-                 val:`${((c.debrisMass||0)*1000).toExponential(2)} g`},
-                {label:'KE at impact',
-                 val:`${((0.5*(c.debrisMass||0)*(ui.debrisVelocity||9000)**2)/1000).toFixed(0)} kJ`},
-                {label:'Vel in shield',
-                 val:`${((c.velocityInShield||0)/1000).toFixed(2)} km/s`},
-                {label:'Mass ablated',
-                 val:`${((c.fractionAblated||0)*100).toFixed(1)}%`},
-                {label:'Pen depth',
-                 val:`${((c.penetrationDepth||0)*1000).toFixed(2)} mm`,
+                {l:'Mass',v:`${((c.debrisMass||0)*1000).toExponential(2)} g`},
+                {l:'KE',v:`${((0.5*(c.debrisMass||0)*(ui.debrisVelocity||9000)**2)/1000).toFixed(0)} kJ`},
+                {l:'Vel in shield',v:`${((c.velocityInShield||0)/1000).toFixed(2)} km/s`},
+                {l:'Ablated',v:`${((c.fractionAblated||0)*100).toFixed(1)}%`},
+                {l:'Pen depth',v:`${((c.penetrationDepth||0)*1000).toFixed(2)} mm`,
                  warn:(c.penetrationDepth||0)>HULL_THICKNESS},
-                {label:'Hull thickness',val:'3.00 mm'},
-                {label:'Penetrates?',
-                 val:c.penetrates?'YES — DANGER':'NO — SAFE',
-                 warn:c.penetrates},
+                {l:'Penetrates?',v:c.penetrates?'YES ⚠':'NO ✓',warn:c.penetrates},
               ].map(r=>(
-                <div key={r.label} style={{
-                  display:'flex',justifyContent:'space-between',
-                  marginBottom:5,fontSize:10
-                }}>
-                  <span style={{color:'#666'}}>{r.label}</span>
-                  <span style={{color:r.warn?'#ff4444':'#fff'}}>{r.val}</span>
+                <div key={r.l} style={{display:'flex',justifyContent:'space-between',
+                                       marginBottom:5,fontSize:10}}>
+                  <span style={{color:'#555'}}>{r.l}</span>
+                  <span style={{color:r.warn?'#ff4444':'#fff'}}>{r.v}</span>
                 </div>
               ))}
             </div>
           </>)}
 
-          {/* ── PHYSICS TAB ── */}
-          {tab==='physics' && (<>
+          {/* ── BELTS TAB ── */}
+          {tab==='belts'&&(<>
             <div style={{color:'#4a8aaa',fontSize:10,
                          letterSpacing:'0.1em',marginBottom:'0.75rem'}}>
-              REAL-TIME PHYSICS VALUES
+              ORBITAL ENVIRONMENT
             </div>
-            {[
-              {label:'Xenon number density',
-               val:`${(c.xenonDensity||0).toExponential(2)} m⁻³`,
-               note:'From mass/volume calculation'},
-              {label:'Xe thermal speed',
-               val:`${((c.thermalSpeed||0)/1000).toFixed(2)} km/s`,
-               note:'Maxwell-Boltzmann at plasma T'},
-              {label:'Ion gyroradius',
-               val:`${((c.gyroradius||0)*100).toFixed(2)} cm`,
-               note:'Larmor radius in B field'},
-              {label:'Confined fraction',
-               val:`${((c.confinedFraction||0)*100).toFixed(1)}%`,
-               note:'Magnetic mirror ratio'},
-              {label:'Plasma heat flux',
-               val:`${((c.heatFlux||0)/1e6).toFixed(2)} MW/m²`,
-               note:'Stefan-Boltzmann at T'},
-              {label:'Velocity reduction',
-               val:`${((c.velocityReduction||0)*100).toFixed(1)}%`,
-               note:'Xenon stopping power'},
-              {label:'Ablation fraction',
-               val:`${((c.fractionAblated||0)*100).toFixed(2)}%`,
-               note:'Heat flux × transit time'},
-              {label:'Shield efficiency',
-               val:`${((c.shieldEfficiency||0)*100).toFixed(1)}%`,
-               note:'Combined all layers'},
-              {label:'Pen depth (Cour-Palais)',
-               val:`${((c.penetrationDepth||0)*1000).toFixed(3)} mm`,
-               note:'NASA standard equation'},
-              {label:'Hull wall (Al)',
-               val:'3.000 mm',
-               note:'Real ISS wall thickness'},
-            ].map(r=>(
-              <div key={r.label} style={{marginBottom:'0.9rem'}}>
+
+            <button onClick={()=>set('showBelts',!params.current.showBelts)}
+              style={{
+                width:'100%',padding:'8px',cursor:'pointer',fontSize:10,
+                background:ui.showBelts?'#0a1a0a':'transparent',
+                border:`1px solid ${ui.showBelts?'#44aa44':'#2a2a2a'}`,
+                color:ui.showBelts?'#44aa44':'#444',marginBottom:'0.75rem'
+              }}>
+              {ui.showBelts?'◉ Debris Belts VISIBLE':'○ Show Debris Belts'}
+            </button>
+
+            {LEO_BELTS.map(belt=>(
+              <div key={belt.name} style={{
+                marginBottom:'0.9rem',padding:'0.6rem',
+                background:'#040c18',border:'1px solid #0a1a2a'
+              }}>
                 <div style={{
-                  display:'flex',justifyContent:'space-between',marginBottom:2
+                  display:'flex',alignItems:'center',gap:8,marginBottom:4
                 }}>
-                  <span style={{color:'#888',fontSize:10}}>{r.label}</span>
-                  <span style={{color:'#fff',fontSize:11,fontWeight:'bold'}}>
-                    {r.val}
+                  <div style={{
+                    width:24,height:8,borderRadius:2,
+                    background:belt.color.replace(/[\d.]+\)$/,'0.8)'),
+                    flexShrink:0
+                  }}/>
+                  <span style={{color:belt.labelColor,fontSize:10,fontWeight:'bold'}}>
+                    {belt.name.split('(')[0].trim()}
                   </span>
                 </div>
-                <div style={{color:'#333',fontSize:9}}>{r.note}</div>
+                <div style={{color:'#555',fontSize:9,lineHeight:1.7}}>
+                  <div style={{color:'#888'}}>{belt.name.match(/\((.+)\)/)?.[1]}</div>
+                  <div>{belt.description}</div>
+                </div>
+              </div>
+            ))}
+
+            <div style={{
+              marginTop:'0.5rem',padding:'0.75rem',
+              background:'#040c18',border:'1px solid #0a1a2a',
+              color:'#555',fontSize:9,lineHeight:1.8
+            }}>
+              <div style={{color:'#4a8aaa',marginBottom:4}}>REAL DEBRIS STATS</div>
+              <div>Objects tracked: ~27,000+</div>
+              <div>Untracked (&gt;1mm): millions</div>
+              <div>LEO density peak: 400-600km</div>
+              <div>Main sources:</div>
+              <div>• 2009 Iridium-Cosmos collision</div>
+              <div>• 2007 Chinese ASAT test</div>
+              <div>• Soviet Cosmos fragments</div>
+              <div>• Normal mission debris</div>
+            </div>
+          </>)}
+
+          {/* ── PHYSICS TAB ── */}
+          {tab==='physics'&&(<>
+            <div style={{color:'#4a8aaa',fontSize:10,
+                         letterSpacing:'0.1em',marginBottom:'0.75rem'}}>
+              REAL-TIME PHYSICS
+            </div>
+            {[
+              {l:'Xe number density',v:`${(c.xenonDensity||0).toExponential(2)} m⁻³`,
+               note:'mass/volume × Avogadro'},
+              {l:'Xe thermal speed',v:`${((c.thermalSpeed||0)/1000).toFixed(2)} km/s`,
+               note:'Maxwell-Boltzmann'},
+              {l:'Ion gyroradius',v:`${((c.gyroradius||0)*100).toFixed(2)} cm`,
+               note:'Larmor radius'},
+              {l:'Confined fraction',v:`${((c.confinedFraction||0)*100).toFixed(1)}%`,
+               note:'Magnetic mirror'},
+              {l:'Heat flux',v:`${((c.heatFlux||0)/1e6).toFixed(0)} MW/m²`,
+               note:'Stefan-Boltzmann'},
+              {l:'Vel reduction',v:`${((c.velocityReduction||0)*100).toFixed(1)}%`,
+               note:'Stopping power'},
+              {l:'Mass ablated',v:`${((c.fractionAblated||0)*100).toFixed(2)}%`,
+               note:'Thermal ablation'},
+              {l:'Shield efficiency',v:`${((c.shieldEfficiency||0)*100).toFixed(1)}%`,
+               note:'Combined layers'},
+              {l:'Pen depth',v:`${((c.penetrationDepth||0)*1000).toFixed(3)} mm`,
+               note:'Cour-Palais (NASA)'},
+              {l:'Hull thickness',v:'3.000 mm',note:'ISS standard Al'},
+            ].map(r=>(
+              <div key={r.l} style={{marginBottom:'0.8rem'}}>
+                <div style={{display:'flex',justifyContent:'space-between',marginBottom:1}}>
+                  <span style={{color:'#666',fontSize:10}}>{r.l}</span>
+                  <span style={{color:'#fff',fontSize:11}}>{r.v}</span>
+                </div>
+                <div style={{color:'#2a2a2a',fontSize:9}}>{r.note}</div>
               </div>
             ))}
 
             <div style={{
               marginTop:'0.5rem',paddingTop:'0.75rem',
               borderTop:'1px solid #1a2a3a',
-              color:'#333',fontSize:9,lineHeight:1.8
+              color:'#2a2a2a',fontSize:9,lineHeight:1.9
             }}>
-              Equations used:<br/>
-              • Maxwell-Boltzmann distribution<br/>
-              • Lorentz magnetic mirror confinement<br/>
-              • Stefan-Boltzmann radiation<br/>
-              • Cour-Palais hypervelocity impact<br/>
-              • Momentum transfer stopping power<br/>
-              • Thermal ablation (sublimation energy)
+              Equations:<br/>
+              • Maxwell-Boltzmann (thermal speed)<br/>
+              • Lorentz magnetic mirror<br/>
+              • Stefan-Boltzmann (heat flux)<br/>
+              • Cour-Palais (hypervelocity)<br/>
+              • Momentum transfer stopping<br/>
+              • Thermal ablation (sublimation)
             </div>
           </>)}
 
